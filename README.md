@@ -12,6 +12,17 @@ There is no other work need to be done, just use it!
 5. Provide `qt5_add_resources_plus`, `qt5_add_big_resources_plus`, `qt5_add_binary_resources_plus` for creating qrc files automatically.
 6. Support parse `QML_ELEMENT`, `QML_NAMED_ELEMENT`,`QML_SINGLETON` macros.
 
+## Fork-specific updates
+
+This fork contains an AI-assisted optimization update drafted with GPT-5.4 and then reviewed before being committed to the fork. The intent is to keep the original API shape while improving compatibility and deployment behavior for real Qt 5 projects.
+
+### Optimization summary
+
+1. Restore generated plugin compatibility for Qt 5 by emitting `QQmlExtensionPlugin` on Qt 5 and keeping `QQmlEngineExtensionPlugin` for Qt 6.
+2. Skip typeinfo generation automatically when the active Qt 5 `moc` cannot emit JSON, and only pass `AUTOMOC_MOC_OPTIONS` when typeinfo generation is enabled.
+3. Add `SOURCE_QMLDIR` support so an existing `qmldir` file can be merged with generated metadata instead of being overwritten wholesale.
+4. Track copied QML and resource outputs with a deploy target, so shared modules deploy files to the output directory while static modules still embed the generated qrc.
+
 ## Usage
 
 ### Syntax
@@ -23,6 +34,7 @@ qt_add_qml_module(<TARGET>
     OUTPUT_DIRECTORY <plugin library target output directory>
     RESOURCE_PREFIX <prefix for qrc file>
     TYPEINFO <typeinfo file(.qmltypes) name>
+    SOURCE_QMLDIR <path to an existing qmldir file>
     SOURCES
         sourceFile1 [sourceFile2 ...]
     QML_FILES
@@ -49,6 +61,7 @@ qt_add_qml_module(<TARGET>
 | `PLUGIN_TARGET` | Default is the lowercase URI. Change it if you like. |
 | `OUTPUT_DIRECTORY` | Default is ${CMAKE_CURRENT_BINARY_DIR}/org/mycompany/components. Change it if you like. |
 | `TYPEINFO` | Default name is the URI which `.` replaced by `_`, like `org_mycompany_components.qmltypes`. Change it if you like. |
+| `SOURCE_QMLDIR` | Optional path to a hand-written `qmldir` file. Generated mandatory fields stay authoritative, while custom entries are merged into the output `qmldir`. |
 | `NO_GENERATE_TYPEINFO` | Turn off typeinfo file auto generation. Default is OFF. If you want to keep `qt_add_qml_module` usable for both Qt5 and Qt6, you can set the `__qml_plugin_no_generate_typeinfo` to control it before use `Qt5QMLPlugin`.|
 | `NO_PUBLIC_SOURCES` | Let source files only visible for ${TARGET}. Default is ON. If you want to keep `qt_add_qml_module` usable for both Qt5 and Qt6, you can set the `__qml_plugin_no_public_sources` to control it before use `Qt5QMLPlugin`.|
 

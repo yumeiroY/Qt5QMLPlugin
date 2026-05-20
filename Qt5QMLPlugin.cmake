@@ -241,7 +241,7 @@ endfunction()
 function(__generate_qrc_file)
     # Define options for parsing arguments
     set(options HAS_QMLDIR)
-    set(oneValueArgs OUTPUT_NAME OUTPUT_DIRECTORY)
+    set(oneValueArgs OUTPUT_NAME OUTPUT_DIRECTORY OUTPUTS_VARIABLE)
     set(multiValueArgs FILES)
     
     # Parse input arguments
@@ -250,6 +250,7 @@ function(__generate_qrc_file)
     # Initialize content for the .qrc file
     set(__qml_plugin_qrc_content "")
     set(__qml_plugin_resources ${FILES})
+    set(__qml_plugin_generated_outputs)
     
     # Process qmldir file if needed
     if(NOT __QRC_HAS_QMLDIR)
@@ -292,9 +293,16 @@ function(__generate_qrc_file)
                 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${__rscfile_absolute_path}
                 COMMENT "Copying ${__rscfile_full_name} to ${__QRC_OUTPUT_DIRECTORY}/${__rscfile_relative_dir}")
         endif()
+        list(APPEND __qml_plugin_generated_outputs ${__QRC_OUTPUT_DIRECTORY}/${__rscfile_path})
         # Append file entry to the .qrc content
         string(APPEND __qml_plugin_qrc_content "        <file>${__rscfile_path}</file>\n")
     endforeach()
+
+    if(__QRC_OUTPUTS_VARIABLE)
+        list(REMOVE_DUPLICATES __qml_plugin_generated_outputs)
+        set(${__QRC_OUTPUTS_VARIABLE} ${__qml_plugin_generated_outputs} PARENT_SCOPE)
+    endif()
+
     # Generate the actual .qrc file using a template
     configure_file(${__qml_plugin_current_dir}/project.qrc.in ${__QRC_OUTPUT_DIRECTORY}/${__QRC_OUTPUT_NAME}.qrc @ONLY)
 endfunction()
@@ -413,7 +421,7 @@ endfunction()
 # Purpose: Core function for defining QML modules, handling resources, typeinfo, and dependencies
 function(qt5_add_qml_module TARGET)
     set(options NO_GENERATE_TYPEINFO NO_PUBLIC_SOURCES)
-    set(oneValueArgs URI VERSION PLUGIN_TARGET OUTPUT_DIRECTORY RESOURCE_PREFIX TYPEINFO)
+    set(oneValueArgs URI VERSION PLUGIN_TARGET OUTPUT_DIRECTORY RESOURCE_PREFIX TYPEINFO SOURCE_QMLDIR)
     set(multiValueArgs SOURCES QML_FILES RESOURCES DEPEND_MODULE DEPEND_MODULE_VERSION)
     
     # Parse input arguments
@@ -494,8 +502,18 @@ function(qt5_add_qml_module TARGET)
         set(__qml_plugin_sources_flag PUBLIC)
     endif()
     
+    set(__qml_plugin_moc_supports_json OFF)
+    if(QT_VERSION_MAJOR GREATER 5)
+        set(__qml_plugin_moc_supports_json ON)
+    elseif(DEFINED Qt5Core_VERSION AND NOT Qt5Core_VERSION VERSION_LESS "5.15.0")
+        set(__qml_plugin_moc_supports_json ON)
+    endif()
+
     # Determine if typeinfo generation should be skipped
-    if(QMLPLUGIN_NO_GENERATE_TYPEINFO OR __qml_plugin_no_generate_typeinfo OR (CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
+    if(QMLPLUGIN_NO_GENERATE_TYPEINFO OR
+       __qml_plugin_no_generate_typeinfo OR
+       (CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug") OR
+       NOT __qml_plugin_moc_supports_json)
         set(QMLPLUGIN_NO_GENERATE_TYPEINFO ON)
     else()
         set(QMLPLUGIN_NO_GENERATE_TYPEINFO OFF)
@@ -544,15 +562,21 @@ function(qt5_add_qml_module TARGET)
         set_target_properties(${DEFAULT_TARGET} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
             LIBRARY_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
-            ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
-            AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
+            ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY})
+        if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
+            set_target_properties(${DEFAULT_TARGET} PROPERTIES
+                AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
+        endif()
     endif()
     
     set_target_properties(${TARGET} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
         LIBRARY_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
-        ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
-        AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
+        ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY})
+    if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
+        set_target_properties(${TARGET} PROPERTIES
+            AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
+    endif()
     
     # Set resource prefix for QRC file
     set(__qml_plugin_qrc_prefix "")
@@ -566,51 +590,52 @@ function(qt5_add_qml_module TARGET)
     target_sources(${TARGET} ${__qml_plugin_sources_flag} ${QMLPLUGIN_SOURCES} ${QMLPLUGIN_QML_FILES})
     
     # Handle module configurations
-    add_dependencies(${TARGET} AutoMocHelper)
-    set_target_properties(${TARGET} PROPERTIES AUTOGEN_TARGET_DEPENDS AutoMocHelper)
-    get_target_property(__qml_plugin_build_dir ${TARGET} AUTOGEN_BUILD_DIR)
-    if(${__qml_plugin_build_dir} MATCHES "NOTFOUND")
-        set(__qml_plugin_build_dir "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_autogen")
+    if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
+        add_dependencies(${TARGET} AutoMocHelper)
+        set_target_properties(${TARGET} PROPERTIES AUTOGEN_TARGET_DEPENDS AutoMocHelper)
+        get_target_property(__qml_plugin_build_dir ${TARGET} AUTOGEN_BUILD_DIR)
+        if(${__qml_plugin_build_dir} MATCHES "NOTFOUND")
+            set(__qml_plugin_build_dir "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_autogen")
+        endif()
+
+        # Generate automoc JSON list file
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
+            COMMAND ${CMAKE_BINARY_DIR}/AutoMocHelper ${__qml_plugin_build_dir} > ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
+            DEPENDS AutoMocHelper ${__qml_plugin_build_dir}/timestamp
+            COMMENT "Generating ${TARGET}'s automoc_json_list.txt"
+            COMMAND_EXPAND_LISTS
+            VERBATIM)
+
+        add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_json_list_generate ALL
+            DEPENDS AutoMocHelper ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt)
+
+        # Generate collected type info file
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json
+            COMMAND ${QT_BIN_DIR}/moc --collect-json  "@${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt" > ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
+            COMMENT "Generating ${TARGET}'s collected_types.json"
+            COMMAND_EXPAND_LISTS
+            VERBATIM)
+        add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_collect_json_generate ALL
+            DEPENDS AutoMocHelper ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
+
+        # Generate type registration C++ file
+        set(__qml_plugin_automoc_type_register_cpp ${CMAKE_CURRENT_BINARY_DIR}/${QMLPLUGIN_PLUGIN_TARGET}_qmltyperegistrations.cpp)
+        if(__target_type MATCHES "EXECUTABLE")
+            add_custom_command(OUTPUT ${__qml_plugin_automoc_type_register_cpp}
+                COMMAND ${QMLTYPEREGISTRAR_BIN} --import-name ${__qml_plugin_uri_name} --major-version ${QMLPLUGIN_VERSION_MAJOR} --minor-version ${QMLPLUGIN_VERSION_MINOR} ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json --generate-qmltypes ${CMAKE_CURRENT_BINARY_DIR}/${QMLPLUGIN_TYPEINFO} > ${__qml_plugin_automoc_type_register_cpp}
+                DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
+        else()
+            add_custom_command(OUTPUT ${__qml_plugin_automoc_type_register_cpp}
+                COMMAND ${QMLTYPEREGISTRAR_BIN} --import-name ${__qml_plugin_uri_name} --major-version ${QMLPLUGIN_VERSION_MAJOR} --minor-version ${QMLPLUGIN_VERSION_MINOR} ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json > ${__qml_plugin_automoc_type_register_cpp}
+                DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
+        endif()
+
+        add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_type_register_generate ALL
+            DEPENDS AutoMocHelper ${__qml_plugin_automoc_type_register_cpp})
+        target_sources(${TARGET} PRIVATE ${__qml_plugin_automoc_type_register_cpp})
+        set_source_files_properties(${__qml_plugin_automoc_type_register_cpp} PROPERTIES SKIP_AUTOGEN ON)
     endif()
-    
-    # Generate automoc JSON list file
-    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
-        COMMAND ${CMAKE_BINARY_DIR}/AutoMocHelper ${__qml_plugin_build_dir} > ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
-        DEPENDS AutoMocHelper ${__qml_plugin_build_dir}/timestamp
-        COMMENT "Generating ${TARGET}'s automoc_json_list.txt"
-        COMMAND_EXPAND_LISTS
-        VERBATIM)
-    
-    add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_json_list_generate ALL
-        DEPENDS AutoMocHelper ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt)
-    
-    # Generate collected type info file
-    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json
-        COMMAND ${QT_BIN_DIR}/moc --collect-json  "@${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt" > ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/automoc_json_list.txt
-        COMMENT "Generating ${TARGET}'s collected_types.json"
-        COMMAND_EXPAND_LISTS
-        VERBATIM)
-    add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_collect_json_generate ALL
-        DEPENDS AutoMocHelper ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
-    
-    # Generate type registration C++ file
-    set(__qml_plugin_automoc_type_register_cpp ${CMAKE_CURRENT_BINARY_DIR}/${QMLPLUGIN_PLUGIN_TARGET}_qmltyperegistrations.cpp)
-    if(__target_type MATCHES "EXECUTABLE")
-        add_custom_command(OUTPUT ${__qml_plugin_automoc_type_register_cpp}
-            COMMAND ${QMLTYPEREGISTRAR_BIN} --import-name ${__qml_plugin_uri_name} --major-version ${QMLPLUGIN_VERSION_MAJOR} --minor-version ${QMLPLUGIN_VERSION_MINOR} ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json --generate-qmltypes ${CMAKE_CURRENT_BINARY_DIR}/${QMLPLUGIN_TYPEINFO} > ${__qml_plugin_automoc_type_register_cpp}
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
-    else()
-        add_custom_command(OUTPUT ${__qml_plugin_automoc_type_register_cpp}
-            COMMAND ${QMLTYPEREGISTRAR_BIN} --import-name ${__qml_plugin_uri_name} --major-version ${QMLPLUGIN_VERSION_MAJOR} --minor-version ${QMLPLUGIN_VERSION_MINOR} ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json > ${__qml_plugin_automoc_type_register_cpp}
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/collected_types.json)
-    endif()
-    
-    add_custom_target(${__qml_plugin_uri_name_for_class}-automoc_type_register_generate ALL
-        DEPENDS AutoMocHelper ${__qml_plugin_automoc_type_register_cpp})
-    target_sources(${TARGET} PRIVATE ${__qml_plugin_automoc_type_register_cpp})
-    set_source_files_properties(${__qml_plugin_automoc_type_register_cpp} PROPERTIES SKIP_AUTOGEN ON)
-    
     # Handle static library specific configurations
     if (__target_type MATCHES "STATIC_LIBRARY")
         target_compile_definitions(${TARGET} PUBLIC
@@ -622,21 +647,39 @@ function(qt5_add_qml_module TARGET)
     if (__target_type MATCHES "STATIC_LIBRARY")
         set(__qml_plugin_static_register_content "void qml_static_register_types_${__qml_plugin_uri_name_for_class}(){\n    Q_INIT_RESOURCE(${__qml_plugin_uri_name_for_class});\n")
     endif()
-    
-    string(APPEND __qml_plugin_qmldir_content "module ${__qml_plugin_uri_name}\n")
-    
+
+    set(__qml_plugin_generated_qmldir_header "module ${__qml_plugin_uri_name}\n")
+
     if (__target_type MATCHES "LIBRARY")
         if (__target_type MATCHES "SHARED_LIBRARY")
-            string(APPEND __qml_plugin_qmldir_content "plugin ${QMLPLUGIN_PLUGIN_TARGET}\n")
+            string(APPEND __qml_plugin_generated_qmldir_header "plugin ${QMLPLUGIN_PLUGIN_TARGET}\n")
         endif()
-        string(APPEND __qml_plugin_qmldir_content "linktarget ${QMLPLUGIN_PLUGIN_TARGET}\n")
-        string(APPEND __qml_plugin_qmldir_content "classname ${__qml_plugin_uri_name_for_class}Plugin\n")
+        string(APPEND __qml_plugin_generated_qmldir_header "linktarget ${QMLPLUGIN_PLUGIN_TARGET}\n")
+        string(APPEND __qml_plugin_generated_qmldir_header "classname ${__qml_plugin_uri_name_for_class}Plugin\n")
     endif()
-    
-    string(APPEND __qml_plugin_qmldir_content "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
-    
+
+    string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
+
     if (__target_type MATCHES "STATIC_LIBRARY")
-        string(APPEND __qml_plugin_qmldir_content "prefer :${__qml_plugin_qrc_prefix}/\n")
+        string(APPEND __qml_plugin_generated_qmldir_header "prefer :${__qml_plugin_qrc_prefix}/\n")
+    endif()
+
+    if(QMLPLUGIN_SOURCE_QMLDIR AND EXISTS ${QMLPLUGIN_SOURCE_QMLDIR})
+        set(__qml_plugin_qmldir_content "${__qml_plugin_generated_qmldir_header}")
+        file(STRINGS ${QMLPLUGIN_SOURCE_QMLDIR} __qml_plugin_source_qmldir_lines)
+        foreach(__qml_plugin_source_qmldir_line IN LISTS __qml_plugin_source_qmldir_lines)
+            string(STRIP "${__qml_plugin_source_qmldir_line}" __qml_plugin_source_qmldir_line_stripped)
+
+            if(__qml_plugin_source_qmldir_line_stripped MATCHES "^(module|plugin|linktarget|classname|typeinfo)([ \t]|$)")
+                continue()
+            endif()
+
+            if(__target_type MATCHES "STATIC_LIBRARY" AND __qml_plugin_source_qmldir_line_stripped MATCHES "^prefer([ \t]|$)")
+                continue()
+            endif()
+
+            string(APPEND __qml_plugin_qmldir_content "${__qml_plugin_source_qmldir_line}\n")
+        endforeach()
     endif()
     
     # Process each QML file to update qmldir and generate static registration code
@@ -653,13 +696,19 @@ function(qt5_add_qml_module TARGET)
         
         string(REPLACE ${__qmlfile_full_name} "" __qmlfile_relative_dir ${__qmlfile_path})
         
+        if(NOT QMLPLUGIN_SOURCE_QMLDIR OR NOT EXISTS ${QMLPLUGIN_SOURCE_QMLDIR})
+            if(${__qmlfile_is_singleton} STREQUAL "NOTFOUND" OR NOT __qmlfile_is_singleton)
+                string(APPEND __qml_plugin_qmldir_content "${__qmlfile_name} ${QMLPLUGIN_VERSION_MAJOR}.${QMLPLUGIN_VERSION_MINOR} ${__qmlfile_path}\n")
+            else()
+                string(APPEND __qml_plugin_qmldir_content "singleton ${__qmlfile_name} ${QMLPLUGIN_VERSION_MAJOR}.${QMLPLUGIN_VERSION_MINOR} ${__qmlfile_path}\n")
+            endif()
+        endif()
+
         if(${__qmlfile_is_singleton} STREQUAL "NOTFOUND" OR NOT __qmlfile_is_singleton)
-            string(APPEND __qml_plugin_qmldir_content "${__qmlfile_name} ${QMLPLUGIN_VERSION_MAJOR}.${QMLPLUGIN_VERSION_MINOR} ${__qmlfile_path}\n")
             if (__target_type MATCHES "STATIC_LIBRARY")
                 string(APPEND __qml_plugin_static_register_content "    qmlRegisterType(")
             endif()
         else()
-            string(APPEND __qml_plugin_qmldir_content "singleton ${__qmlfile_name} ${QMLPLUGIN_VERSION_MAJOR}.${QMLPLUGIN_VERSION_MINOR} ${__qmlfile_path}\n")
             if (__target_type MATCHES "STATIC_LIBRARY")
                 string(APPEND __qml_plugin_static_register_content "    qmlRegisterSingletonType(")
             endif()
@@ -709,6 +758,7 @@ function(qt5_add_qml_module TARGET)
             HAS_QMLDIR ON
             OUTPUT_NAME ${__qml_plugin_uri_name_for_class}
             OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
+            OUTPUTS_VARIABLE __qml_plugin_deploy_outputs
             FILES ${QMLPLUGIN_RESOURCES} ${QMLPLUGIN_QML_FILES}
         )
     else()
@@ -716,13 +766,25 @@ function(qt5_add_qml_module TARGET)
             HAS_QMLDIR OFF
             OUTPUT_NAME ${__qml_plugin_uri_name_for_class}
             OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
+            OUTPUTS_VARIABLE __qml_plugin_deploy_outputs
             FILES ${QMLPLUGIN_RESOURCES} ${QMLPLUGIN_QML_FILES}
         )
     endif()
+
+    if(__qml_plugin_deploy_outputs)
+        add_custom_target(${__qml_plugin_uri_name_for_class}_deploy_files
+            DEPENDS ${__qml_plugin_deploy_outputs})
+        add_dependencies(${TARGET} ${__qml_plugin_uri_name_for_class}_deploy_files)
+        if(DEFAULT_TARGET)
+            add_dependencies(${DEFAULT_TARGET} ${__qml_plugin_uri_name_for_class}_deploy_files)
+        endif()
+    endif()
     
-    # Add the generated QRC file to the target
-    qt5_add_resources(__qml_plugin_qrc_file ${QMLPLUGIN_OUTPUT_DIRECTORY}/${__qml_plugin_uri_name_for_class}.qrc)
-    target_sources(${TARGET} PRIVATE ${__qml_plugin_qrc_file})
+    # Add the generated QRC file only for static libraries. Shared modules deploy from the file system.
+    if (__target_type MATCHES "STATIC_LIBRARY")
+        qt5_add_resources(__qml_plugin_qrc_file ${QMLPLUGIN_OUTPUT_DIRECTORY}/${__qml_plugin_uri_name_for_class}.qrc)
+        target_sources(${TARGET} PRIVATE ${__qml_plugin_qrc_file})
+    endif()
     
     # Generate QML type info file if needed for shared libraries
     if (__target_type MATCHES "SHARED_LIBRARY" AND NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
