@@ -556,6 +556,19 @@ function(qt5_add_qml_module TARGET)
     if(NOT DEFINED QMLPLUGIN_DEPEND_MODULE_VERSION AND __qml_plugin_depend_module_version)
         set(QMLPLUGIN_DEPEND_MODULE_VERSION ${__qml_plugin_depend_module_version})
     endif()
+
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(__qml_plugin_output_dir_config_properties)
+        foreach(__qml_plugin_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            string(TOUPPER ${__qml_plugin_config} __qml_plugin_config_upper)
+            list(APPEND __qml_plugin_output_dir_config_properties
+                RUNTIME_OUTPUT_DIRECTORY_${__qml_plugin_config_upper} ${QMLPLUGIN_OUTPUT_DIRECTORY}
+                LIBRARY_OUTPUT_DIRECTORY_${__qml_plugin_config_upper} ${QMLPLUGIN_OUTPUT_DIRECTORY}
+                ARCHIVE_OUTPUT_DIRECTORY_${__qml_plugin_config_upper} ${QMLPLUGIN_OUTPUT_DIRECTORY}
+                PDB_OUTPUT_DIRECTORY_${__qml_plugin_config_upper} ${QMLPLUGIN_OUTPUT_DIRECTORY}
+            )
+        endforeach()
+    endif()
     
     # Set output directory properties for target
     if(DEFAULT_TARGET)
@@ -563,6 +576,10 @@ function(qt5_add_qml_module TARGET)
             RUNTIME_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
             LIBRARY_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
             ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY})
+        if(__qml_plugin_output_dir_config_properties)
+            set_target_properties(${DEFAULT_TARGET} PROPERTIES
+                ${__qml_plugin_output_dir_config_properties})
+        endif()
         if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
             set_target_properties(${DEFAULT_TARGET} PROPERTIES
                 AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
@@ -573,6 +590,10 @@ function(qt5_add_qml_module TARGET)
         RUNTIME_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
         LIBRARY_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY}
         ARCHIVE_OUTPUT_DIRECTORY ${QMLPLUGIN_OUTPUT_DIRECTORY})
+    if(__qml_plugin_output_dir_config_properties)
+        set_target_properties(${TARGET} PROPERTIES
+            ${__qml_plugin_output_dir_config_properties})
+    endif()
     if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
         set_target_properties(${TARGET} PROPERTIES
             AUTOMOC_MOC_OPTIONS "--output-json;--output-dep-file")
@@ -658,7 +679,21 @@ function(qt5_add_qml_module TARGET)
         string(APPEND __qml_plugin_generated_qmldir_header "classname ${__qml_plugin_uri_name_for_class}Plugin\n")
     endif()
 
-    string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
+    if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
+        # 正常路径：Qt ≥ 5.15 + Release → qmltyperegistrar 生成 .qmltypes
+        string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
+    elseif(NOT (CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
+        # Qt 5.9 兜底路径：qmlplugindump 替代 qmltyperegistrar 生成 .qmltypes
+        # 注意：Windows Debug 下 qmlplugindump 无法加载 Debug DLL（Release/Debug Qt 库不兼容），跳过
+        string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
+        if(__target_type MATCHES "SHARED_LIBRARY")
+            add_custom_command(TARGET ${TARGET} POST_BUILD
+                COMMAND ${QMLPLUGINDUMP_BIN} -nonrelocatable ${__qml_plugin_uri_name} ${QMLPLUGIN_VERSION} ${__qml_plugin_output_dir_parent} -output "${QMLPLUGIN_OUTPUT_DIRECTORY}/${QMLPLUGIN_TYPEINFO}"
+                COMMENT "Generating ${TARGET} typeinfo via qmlplugindump (Qt5.9 fallback)"
+                )
+        endif()
+    endif()
+    # else: Windows Debug → .qmltypes 不生成，qmldir 不写 typeinfo 行（避免引用不存在的文件）
 
     if (__target_type MATCHES "STATIC_LIBRARY")
         string(APPEND __qml_plugin_generated_qmldir_header "prefer :${__qml_plugin_qrc_prefix}/\n")
