@@ -509,10 +509,24 @@ function(qt5_add_qml_module TARGET)
         set(__qml_plugin_moc_supports_json ON)
     endif()
 
-    # Determine if typeinfo generation should be skipped
+    # Determine if typeinfo generation should be skipped.
+    # Note: Visual Studio multi-config generators do not set CMAKE_BUILD_TYPE at configure time.
+    # Use CMAKE_CONFIGURATION_TYPES as a proxy: its presence means a multi-config generator is
+    # active (VS / Ninja Multi-Config), so we cannot know the build type at configure time and
+    # must skip typeinfo to avoid qmlplugindump mixing debug/release Qt libraries.
+    if(CMAKE_CONFIGURATION_TYPES)
+        # Multi-config generator (e.g. Visual Studio): build type unknown at configure time.
+        # qmlplugindump is always the Release tool and cannot load Debug DLLs, so skip entirely.
+        set(__qml_plugin_is_debug_win32 ON)
+    else()
+        set(__qml_plugin_is_debug_win32 OFF)
+        if(CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(__qml_plugin_is_debug_win32 ON)
+        endif()
+    endif()
     if(QMLPLUGIN_NO_GENERATE_TYPEINFO OR
        __qml_plugin_no_generate_typeinfo OR
-       (CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug") OR
+       __qml_plugin_is_debug_win32 OR
        NOT __qml_plugin_moc_supports_json)
         set(QMLPLUGIN_NO_GENERATE_TYPEINFO ON)
     else()
@@ -682,7 +696,7 @@ function(qt5_add_qml_module TARGET)
     if(NOT QMLPLUGIN_NO_GENERATE_TYPEINFO)
         # 正常路径：Qt ≥ 5.15 + Release → qmltyperegistrar 生成 .qmltypes
         string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
-    elseif(NOT (CMAKE_HOST_WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
+    elseif(NOT __qml_plugin_is_debug_win32)
         # Qt 5.9 兜底路径：qmlplugindump 替代 qmltyperegistrar 生成 .qmltypes
         # 注意：Windows Debug 下 qmlplugindump 无法加载 Debug DLL（Release/Debug Qt 库不兼容），跳过
         string(APPEND __qml_plugin_generated_qmldir_header "typeinfo ${QMLPLUGIN_TYPEINFO}\n")
